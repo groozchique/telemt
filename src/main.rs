@@ -942,22 +942,21 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut grouped: BTreeMap<i32, Vec<MePingSample>> = BTreeMap::new();
         for report in me_results {
             for s in report.samples {
-                let key = s.dc.abs();
-                grouped.entry(key).or_default().push(s);
+                grouped.entry(s.dc).or_default().push(s);
             }
         }
 
         let family_order = if prefer_ipv6 {
-            vec![(MePingFamily::V6, true), (MePingFamily::V6, false), (MePingFamily::V4, true), (MePingFamily::V4, false)]
+            vec![MePingFamily::V6, MePingFamily::V4]
         } else {
-            vec![(MePingFamily::V4, true), (MePingFamily::V4, false), (MePingFamily::V6, true), (MePingFamily::V6, false)]
+            vec![MePingFamily::V4, MePingFamily::V6]
         };
 
-        for (dc_abs, samples) in grouped {
-            for (family, is_pos) in &family_order {
+        for (dc, samples) in grouped {
+            for family in &family_order {
                 let fam_samples: Vec<&MePingSample> = samples
                     .iter()
-                    .filter(|s| matches!(s.family, f if &f == family) && (s.dc >= 0) == *is_pos)
+                    .filter(|s| matches!(s.family, f if &f == family))
                     .collect();
                 if fam_samples.is_empty() {
                     continue;
@@ -967,7 +966,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     MePingFamily::V4 => "IPv4",
                     MePingFamily::V6 => "IPv6",
                 };
-                info!("    DC{} [{}]", dc_abs, fam_label);
+                info!("    DC{} [{}]", dc, fam_label);
                 for sample in fam_samples {
                     let line = format_sample_line(sample);
                     info!("{}", line);

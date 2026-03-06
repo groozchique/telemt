@@ -320,7 +320,7 @@ impl MePool {
             pool_size: 2,
             proxy_map_v4: Arc::new(RwLock::new(proxy_map_v4)),
             proxy_map_v6: Arc::new(RwLock::new(proxy_map_v6)),
-            default_dc: AtomicI32::new(default_dc.unwrap_or(0)),
+            default_dc: AtomicI32::new(default_dc.unwrap_or(2)),
             next_writer_id: AtomicU64::new(1),
             ping_tracker: Arc::new(Mutex::new(HashMap::new())),
             rtt_stats: Arc::new(Mutex::new(HashMap::new())),
@@ -623,6 +623,58 @@ impl MePool {
             }
         }
         order
+    }
+
+    pub(super) fn default_dc_for_routing(&self) -> i32 {
+        let dc = self.default_dc.load(Ordering::Relaxed);
+        if dc == 0 { 2 } else { dc }
+    }
+
+    pub(super) fn dc_lookup_chain_for_target(&self, target_dc: i32) -> Vec<i32> {
+        let mut out = Vec::with_capacity(1);
+        if target_dc != 0 {
+            out.push(target_dc);
+        } else {
+            // Use default DC only when target DC is unknown and pinning is not established.
+            let fallback_dc = self.default_dc_for_routing();
+            out.push(fallback_dc);
+        }
+        out
+    }
+
+    pub(super) async fn resolve_dc_for_endpoint(&self, addr: SocketAddr) -> i32 {
+        let map_guard = if addr.is_ipv4() {
+            self.proxy_map_v4.read().await
+        } else {
+            self.proxy_map_v6.read().await
+        };
+
+        let mut matched_dc: Option<i32> = None;
+        let mut ambiguous = false;
+        for (dc, addrs) in map_guard.iter() {
+            if addrs
+                .iter()
+                .any(|(ip, port)| SocketAddr::new(*ip, *port) == addr)
+            {
+                match matched_dc {
+                    None => matched_dc = Some(*dc),
+                    Some(prev_dc) if prev_dc == *dc => {}
+                    Some(_) => {
+                        ambiguous = true;
+                        break;
+                    }
+                }
+            }
+        }
+        drop(map_guard);
+
+        if !ambiguous
+            && let Some(dc) = matched_dc
+        {
+            return dc;
+        }
+
+        self.default_dc_for_routing()
     }
 
     pub(super) async fn proxy_map_for_family(

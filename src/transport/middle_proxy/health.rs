@@ -102,7 +102,7 @@ async fn check_family(
 
     let mut dc_endpoints = HashMap::<i32, Vec<SocketAddr>>::new();
     for (dc, addrs) in map {
-        let entry = dc_endpoints.entry(dc.abs()).or_default();
+        let entry = dc_endpoints.entry(dc).or_default();
         for (ip, port) in addrs {
             entry.push(SocketAddr::new(ip, port));
         }

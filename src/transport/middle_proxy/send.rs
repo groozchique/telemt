@@ -195,37 +195,24 @@ impl MePool {
                             return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
                         }
                         emergency_attempts += 1;
-                        for family in self.family_order() {
-                            let map_guard = match family {
-                                IpFamily::V4 => self.proxy_map_v4.read().await,
-                                IpFamily::V6 => self.proxy_map_v6.read().await,
-                            };
-                            if let Some(addrs) = map_guard.get(&(target_dc as i32)) {
-                                let mut shuffled = addrs.clone();
-                                shuffled.shuffle(&mut rand::rng());
-                                drop(map_guard);
-                                for (ip, port) in shuffled {
-                                    let addr = SocketAddr::new(ip, port);
-                                    if self.connect_one(addr, self.rng.as_ref()).await.is_ok() {
-                                        break;
-                                    }
-                                }
-                                tokio::time::sleep(Duration::from_millis(100 * emergency_attempts as u64)).await;
-                                let ws2 = self.writers.read().await;
-                                writers_snapshot = ws2.clone();
-                                drop(ws2);
-                                candidate_indices = self
-                                    .candidate_indices_for_dc(&writers_snapshot, target_dc, false)
-                                    .await;
-                                if candidate_indices.is_empty() {
-                                    candidate_indices = self
-                                        .candidate_indices_for_dc(&writers_snapshot, target_dc, true)
-                                        .await;
-                                }
-                                if !candidate_indices.is_empty() {
-                                    break;
-                                }
+                        let mut endpoints = self.endpoint_candidates_for_target_dc(target_dc).await;
+                        endpoints.shuffle(&mut rand::rng());
+                        for addr in endpoints {
+                            if self.connect_one(addr, self.rng.as_ref()).await.is_ok() {
+                                break;
                             }
+                        }
+                        tokio::time::sleep(Duration::from_millis(100 * emergency_attempts as u64)).await;
+                        let ws2 = self.writers.read().await;
+                        writers_snapshot = ws2.clone();
+                        drop(ws2);
+                        candidate_indices = self
+                            .candidate_indices_for_dc(&writers_snapshot, target_dc, false)
+                            .await;
+                        if candidate_indices.is_empty() {
+                            candidate_indices = self
+                                .candidate_indices_for_dc(&writers_snapshot, target_dc, true)
+                                .await;
                         }
                         if candidate_indices.is_empty() {
                             return Err(ProxyError::Proxy("No ME writers available for target DC".into()));
@@ -458,25 +445,27 @@ impl MePool {
         let key = target_dc as i32;
         let mut preferred = Vec::<SocketAddr>::new();
         let mut seen = HashSet::<SocketAddr>::new();
+        let lookup_keys = self.dc_lookup_chain_for_target(key);
 
         for family in self.family_order() {
             let map = match family {
                 IpFamily::V4 => self.proxy_map_v4.read().await.clone(),
                 IpFamily::V6 => self.proxy_map_v6.read().await.clone(),
             };
-            let mut lookup_keys = vec![key, key.abs(), -key.abs()];
-            let def = self.default_dc.load(Ordering::Relaxed);
-            if def != 0 {
-                lookup_keys.push(def);
-            }
-            for lookup in lookup_keys {
+            let mut family_selected = Vec::<SocketAddr>::new();
+            for lookup in lookup_keys.iter().copied() {
                 if let Some(addrs) = map.get(&lookup) {
                     for (ip, port) in addrs {
-                        let addr = SocketAddr::new(*ip, *port);
-                        if seen.insert(addr) {
-                            preferred.push(addr);
-                        }
+                        family_selected.push(SocketAddr::new(*ip, *port));
                     }
+                }
+                if !family_selected.is_empty() {
+                    break;
+                }
+            }
+            for addr in family_selected {
+                if seen.insert(addr) {
+                    preferred.push(addr);
                 }
             }
             if !preferred.is_empty() && !self.decision.effective_multipath {
@@ -569,36 +558,23 @@ impl MePool {
     ) -> Vec<usize> {
         let key = target_dc as i32;
         let mut preferred = Vec::<SocketAddr>::new();
+        let lookup_keys = self.dc_lookup_chain_for_target(key);
 
         for family in self.family_order() {
             let map_guard = match family {
                 IpFamily::V4 => self.proxy_map_v4.read().await,
                 IpFamily::V6 => self.proxy_map_v6.read().await,
             };
-
-            if let Some(v) = map_guard.get(&key) {
-                preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
-            }
-            if preferred.is_empty() {
-                let abs = key.abs();
-                if let Some(v) = map_guard.get(&abs) {
-                    preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+            let mut family_selected = Vec::<SocketAddr>::new();
+            for lookup in lookup_keys.iter().copied() {
+                if let Some(v) = map_guard.get(&lookup) {
+                    family_selected.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
+                }
+                if !family_selected.is_empty() {
+                    break;
                 }
             }
-            if preferred.is_empty() {
-                let abs = key.abs();
-                if let Some(v) = map_guard.get(&-abs) {
-                    preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
-                }
-            }
-            if preferred.is_empty() {
-                let def = self.default_dc.load(Ordering::Relaxed);
-                if def != 0
-                    && let Some(v) = map_guard.get(&def)
-                {
-                    preferred.extend(v.iter().map(|(ip, port)| SocketAddr::new(*ip, *port)));
-                }
-            }
+            preferred.extend(family_selected);
 
             drop(map_guard);
 
@@ -608,9 +584,7 @@ impl MePool {
         }
 
         if preferred.is_empty() {
-            return (0..writers.len())
-                .filter(|i| self.writer_eligible_for_selection(&writers[*i], include_warm))
-                .collect();
+            return Vec::new();
         }
 
         let mut out = Vec::new();
@@ -621,11 +595,6 @@ impl MePool {
             if preferred.contains(&w.addr) {
                 out.push(idx);
             }
-        }
-        if out.is_empty() {
-            return (0..writers.len())
-                .filter(|i| self.writer_eligible_for_selection(&writers[*i], include_warm))
-                .collect();
         }
         out
     }

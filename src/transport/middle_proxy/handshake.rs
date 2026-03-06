@@ -84,38 +84,7 @@ impl MePool {
     }
 
     async fn resolve_dc_idx_for_endpoint(&self, addr: SocketAddr) -> Option<i16> {
-        if addr.is_ipv4() {
-            let map = self.proxy_map_v4.read().await;
-            for (dc, addrs) in map.iter() {
-                if addrs
-                    .iter()
-                    .any(|(ip, port)| SocketAddr::new(*ip, *port) == addr)
-                {
-                    let abs_dc = dc.abs();
-                    if abs_dc > 0
-                        && let Ok(dc_idx) = i16::try_from(abs_dc)
-                    {
-                        return Some(dc_idx);
-                    }
-                }
-            }
-        } else {
-            let map = self.proxy_map_v6.read().await;
-            for (dc, addrs) in map.iter() {
-                if addrs
-                    .iter()
-                    .any(|(ip, port)| SocketAddr::new(*ip, *port) == addr)
-                {
-                    let abs_dc = dc.abs();
-                    if abs_dc > 0
-                        && let Ok(dc_idx) = i16::try_from(abs_dc)
-                    {
-                        return Some(dc_idx);
-                    }
-                }
-            }
-        }
-        None
+        i16::try_from(self.resolve_dc_for_endpoint(addr).await).ok()
     }
 
     fn direct_bind_ip_for_stun(
