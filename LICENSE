@@ -1,17 +1,4 @@
-# LICENSING
-## Licenses for Versions
-| Version ≥ | Version ≤ | License       |
-|-----------|-----------|---------------|
-| 1.0       | 2.0.0.1   | NO LICNESE    |
-| 3.0.0     | 3.4.0     | TELEMT PL 3   |
-
-### License Types
-- **NO LICENSE** = ***ALL RIGHT RESERVED***
-- **TELEMT PL** - special Telemt Public License based on Apache License 2 principles
-
-## Telemt Public License 3
-```text
-TELEMT Public License 3 - 2026
+### TELEMT Public License 3 - 2026 ###
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -72,4 +59,3 @@ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 USE OR OTHER DEALINGS IN THE SOFTWARE
-```
