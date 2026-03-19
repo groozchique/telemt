@@ -8,6 +8,7 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use rand::Rng;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -525,6 +526,11 @@ impl MePool {
                 self.conn_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
+        // State invariant:
+        // - writer is removed from `self.writers` (pool visibility),
+        // - writer is removed from registry routing/binding maps via `writer_lost`.
+        // The close command below is only a best-effort accelerator for task shutdown.
+        // Cleanup progress must never depend on command-channel availability.
         let conns = self.registry.writer_lost(writer_id).await;
         {
             let mut tracker = self.ping_tracker.lock().await;
@@ -532,7 +538,25 @@ impl MePool {
         }
         self.rtt_stats.lock().await.remove(&writer_id);
         if let Some(tx) = close_tx {
-            let _ = tx.send(WriterCommand::Close).await;
+            match tx.try_send(WriterCommand::Close) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    self.stats.increment_me_writer_close_signal_drop_total();
+                    self.stats
+                        .increment_me_writer_close_signal_channel_full_total();
+                    debug!(
+                        writer_id,
+                        "Skipping close signal for removed writer: command channel is full"
+                    );
+                }
+                Err(TrySendError::Closed(_)) => {
+                    self.stats.increment_me_writer_close_signal_drop_total();
+                    debug!(
+                        writer_id,
+                        "Skipping close signal for removed writer: command channel is closed"
+                    );
+                }
+            }
         }
         if trigger_refill
             && let Some(addr) = removed_addr
