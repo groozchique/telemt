@@ -1,4 +1,11 @@
-//! CLI commands: --init (fire-and-forget setup), daemon options
+//! CLI commands: --init (fire-and-forget setup), daemon options, subcommands
+//!
+//! Subcommands:
+//! - `start [OPTIONS] [config.toml]` - Start the daemon
+//! - `stop [--pid-file PATH]` - Stop a running daemon
+//! - `reload [--pid-file PATH]` - Reload configuration (SIGHUP)
+//! - `status [--pid-file PATH]` - Check daemon status
+//! - `run [OPTIONS] [config.toml]` - Run in foreground (default behavior)
 
 use rand::RngExt;
 use std::fs;
@@ -6,9 +13,258 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(unix)]
-use crate::daemon::DaemonOptions;
+use crate::daemon::{self, DaemonOptions, DEFAULT_PID_FILE};
+
+/// CLI subcommand to execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Subcommand {
+    /// Run the proxy (default, or explicit `run` subcommand).
+    Run,
+    /// Start as daemon (`start` subcommand).
+    Start,
+    /// Stop a running daemon (`stop` subcommand).
+    Stop,
+    /// Reload configuration (`reload` subcommand).
+    Reload,
+    /// Check daemon status (`status` subcommand).
+    Status,
+    /// Fire-and-forget setup (`--init`).
+    Init,
+}
+
+/// Parsed subcommand with its options.
+#[derive(Debug)]
+pub struct ParsedCommand {
+    pub subcommand: Subcommand,
+    pub pid_file: PathBuf,
+    pub config_path: String,
+    #[cfg(unix)]
+    pub daemon_opts: DaemonOptions,
+    pub init_opts: Option<InitOptions>,
+}
+
+impl Default for ParsedCommand {
+    fn default() -> Self {
+        Self {
+            subcommand: Subcommand::Run,
+            #[cfg(unix)]
+            pid_file: PathBuf::from(DEFAULT_PID_FILE),
+            #[cfg(not(unix))]
+            pid_file: PathBuf::from("/var/run/telemt.pid"),
+            config_path: "config.toml".to_string(),
+            #[cfg(unix)]
+            daemon_opts: DaemonOptions::default(),
+            init_opts: None,
+        }
+    }
+}
+
+/// Parse CLI arguments into a command structure.
+pub fn parse_command(args: &[String]) -> ParsedCommand {
+    let mut cmd = ParsedCommand::default();
+
+    // Check for --init first (legacy form)
+    if args.iter().any(|a| a == "--init") {
+        cmd.subcommand = Subcommand::Init;
+        cmd.init_opts = parse_init_args(args);
+        return cmd;
+    }
+
+    // Check for subcommand as first argument
+    if let Some(first) = args.first() {
+        match first.as_str() {
+            "start" => {
+                cmd.subcommand = Subcommand::Start;
+                #[cfg(unix)]
+                {
+                    cmd.daemon_opts = parse_daemon_args(args);
+                    // Force daemonize for start command
+                    cmd.daemon_opts.daemonize = true;
+                }
+            }
+            "stop" => {
+                cmd.subcommand = Subcommand::Stop;
+            }
+            "reload" => {
+                cmd.subcommand = Subcommand::Reload;
+            }
+            "status" => {
+                cmd.subcommand = Subcommand::Status;
+            }
+            "run" => {
+                cmd.subcommand = Subcommand::Run;
+                #[cfg(unix)]
+                {
+                    cmd.daemon_opts = parse_daemon_args(args);
+                }
+            }
+            _ => {
+                // No subcommand, default to Run
+                #[cfg(unix)]
+                {
+                    cmd.daemon_opts = parse_daemon_args(args);
+                }
+            }
+        }
+    }
+
+    // Parse remaining options
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            // Skip subcommand names
+            "start" | "stop" | "reload" | "status" | "run" => {}
+            // PID file option (for stop/reload/status)
+            "--pid-file" => {
+                i += 1;
+                if i < args.len() {
+                    cmd.pid_file = PathBuf::from(&args[i]);
+                    #[cfg(unix)]
+                    {
+                        cmd.daemon_opts.pid_file = Some(cmd.pid_file.clone());
+                    }
+                }
+            }
+            s if s.starts_with("--pid-file=") => {
+                cmd.pid_file = PathBuf::from(s.trim_start_matches("--pid-file="));
+                #[cfg(unix)]
+                {
+                    cmd.daemon_opts.pid_file = Some(cmd.pid_file.clone());
+                }
+            }
+            // Config path (positional, non-flag argument)
+            s if !s.starts_with('-') => {
+                cmd.config_path = s.to_string();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    cmd
+}
+
+/// Execute a subcommand that doesn't require starting the server.
+/// Returns `Some(exit_code)` if the command was handled, `None` if server should start.
+#[cfg(unix)]
+pub fn execute_subcommand(cmd: &ParsedCommand) -> Option<i32> {
+    match cmd.subcommand {
+        Subcommand::Stop => Some(cmd_stop(&cmd.pid_file)),
+        Subcommand::Reload => Some(cmd_reload(&cmd.pid_file)),
+        Subcommand::Status => Some(cmd_status(&cmd.pid_file)),
+        Subcommand::Init => {
+            if let Some(opts) = cmd.init_opts.clone() {
+                match run_init(opts) {
+                    Ok(()) => Some(0),
+                    Err(e) => {
+                        eprintln!("[telemt] Init failed: {}", e);
+                        Some(1)
+                    }
+                }
+            } else {
+                Some(1)
+            }
+        }
+        // Run and Start need the server
+        Subcommand::Run | Subcommand::Start => None,
+    }
+}
+
+#[cfg(not(unix))]
+pub fn execute_subcommand(cmd: &ParsedCommand) -> Option<i32> {
+    match cmd.subcommand {
+        Subcommand::Stop | Subcommand::Reload | Subcommand::Status => {
+            eprintln!("[telemt] Subcommand not supported on this platform");
+            Some(1)
+        }
+        Subcommand::Init => {
+            if let Some(opts) = cmd.init_opts.clone() {
+                match run_init(opts) {
+                    Ok(()) => Some(0),
+                    Err(e) => {
+                        eprintln!("[telemt] Init failed: {}", e);
+                        Some(1)
+                    }
+                }
+            } else {
+                Some(1)
+            }
+        }
+        Subcommand::Run | Subcommand::Start => None,
+    }
+}
+
+/// Stop command: send SIGTERM to the running daemon.
+#[cfg(unix)]
+fn cmd_stop(pid_file: &Path) -> i32 {
+    use nix::sys::signal::Signal;
+
+    println!("Stopping telemt daemon...");
+
+    match daemon::signal_pid_file(pid_file, Signal::SIGTERM) {
+        Ok(()) => {
+            println!("Stop signal sent successfully");
+
+            // Wait for process to exit (up to 10 seconds)
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let daemon::DaemonStatus::NotRunning = daemon::check_status(pid_file) {
+                    println!("Daemon stopped");
+                    return 0;
+                }
+            }
+            println!("Daemon may still be shutting down");
+            0
+        }
+        Err(e) => {
+            eprintln!("Failed to stop daemon: {}", e);
+            1
+        }
+    }
+}
+
+/// Reload command: send SIGHUP to trigger config reload.
+#[cfg(unix)]
+fn cmd_reload(pid_file: &Path) -> i32 {
+    use nix::sys::signal::Signal;
+
+    println!("Reloading telemt configuration...");
+
+    match daemon::signal_pid_file(pid_file, Signal::SIGHUP) {
+        Ok(()) => {
+            println!("Reload signal sent successfully");
+            0
+        }
+        Err(e) => {
+            eprintln!("Failed to reload daemon: {}", e);
+            1
+        }
+    }
+}
+
+/// Status command: check if daemon is running.
+#[cfg(unix)]
+fn cmd_status(pid_file: &Path) -> i32 {
+    match daemon::check_status(pid_file) {
+        daemon::DaemonStatus::Running(pid) => {
+            println!("telemt is running (pid {})", pid);
+            0
+        }
+        daemon::DaemonStatus::Stale(pid) => {
+            println!("telemt is not running (stale pid file, was pid {})", pid);
+            // Clean up stale PID file
+            let _ = std::fs::remove_file(pid_file);
+            1
+        }
+        daemon::DaemonStatus::NotRunning => {
+            println!("telemt is not running");
+            1
+        }
+    }
+}
 
 /// Options for the init command
+#[derive(Debug, Clone)]
 pub struct InitOptions {
     pub port: u16,
     pub domain: String,

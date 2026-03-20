@@ -128,7 +128,17 @@ pub(crate) fn parse_cli() -> CliArgs {
 }
 
 fn print_help() {
-    eprintln!("Usage: telemt [config.toml] [OPTIONS]");
+    eprintln!("Usage: telemt [COMMAND] [OPTIONS] [config.toml]");
+    eprintln!();
+    eprintln!("Commands:");
+    eprintln!("  run                     Run in foreground (default if no command given)");
+    #[cfg(unix)]
+    {
+        eprintln!("  start                   Start as background daemon");
+        eprintln!("  stop                    Stop a running daemon");
+        eprintln!("  reload                  Reload configuration (send SIGHUP)");
+        eprintln!("  status                  Check if daemon is running");
+    }
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --data-path <DIR>       Set data directory (absolute path; overrides config value)");
@@ -162,6 +172,17 @@ fn print_help() {
     eprintln!("    --user <NAME>          Username (default: user)");
     eprintln!("    --config-dir <DIR>     Config directory (default: /etc/telemt)");
     eprintln!("    --no-start             Don't start the service after install");
+    #[cfg(unix)]
+    {
+        eprintln!();
+        eprintln!("Examples:");
+        eprintln!("  telemt config.toml                    Run in foreground");
+        eprintln!("  telemt start config.toml              Start as daemon");
+        eprintln!("  telemt start --pid-file /tmp/t.pid    Start with custom PID file");
+        eprintln!("  telemt stop                           Stop daemon");
+        eprintln!("  telemt reload                         Reload configuration");
+        eprintln!("  telemt status                         Check daemon status");
+    }
 }
 
 #[cfg(test)]

@@ -30,11 +30,18 @@ mod transport;
 mod util;
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = cli::parse_command(&args);
+
+    // Handle subcommands that don't need the server (stop, reload, status, init)
+    if let Some(exit_code) = cli::execute_subcommand(&cmd) {
+        std::process::exit(exit_code);
+    }
+
     // On Unix, handle daemonization before starting tokio runtime
     #[cfg(unix)]
     {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let daemon_opts = cli::parse_daemon_args(&args);
+        let daemon_opts = cmd.daemon_opts;
 
         // Daemonize if requested (must happen before tokio runtime starts)
         if daemon_opts.should_daemonize() {
