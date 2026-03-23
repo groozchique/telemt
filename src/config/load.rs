@@ -1267,10 +1267,7 @@ mod tests {
             cfg.server.proxy_protocol_trusted_cidrs,
             default_proxy_protocol_trusted_cidrs()
         );
-        assert_eq!(
-            cfg.censorship.unknown_sni_action,
-            UnknownSniAction::Drop
-        );
+        assert_eq!(cfg.censorship.unknown_sni_action, UnknownSniAction::Drop);
         assert_eq!(cfg.server.api.listen, default_api_listen());
         assert_eq!(cfg.server.api.whitelist, default_api_whitelist());
         assert_eq!(
@@ -1493,7 +1490,10 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(cfg_default.censorship.unknown_sni_action, UnknownSniAction::Drop);
+        assert_eq!(
+            cfg_default.censorship.unknown_sni_action,
+            UnknownSniAction::Drop
+        );
 
         let cfg_mask: ProxyConfig = toml::from_str(
             r#"
@@ -1506,7 +1506,10 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(cfg_mask.censorship.unknown_sni_action, UnknownSniAction::Mask);
+        assert_eq!(
+            cfg_mask.censorship.unknown_sni_action,
+            UnknownSniAction::Mask
+        );
     }
 
     #[test]

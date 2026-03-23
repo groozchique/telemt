@@ -667,7 +667,8 @@ where
 
     let cached = if config.censorship.tls_emulation {
         if let Some(cache) = tls_cache.as_ref() {
-            let selected_domain = matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
+            let selected_domain =
+                matched_tls_domain.unwrap_or(config.censorship.tls_domain.as_str());
             let cached_entry = cache.get(selected_domain).await;
             let use_full_cert_payload = cache
                 .take_full_cert_budget_for_ip(

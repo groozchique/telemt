@@ -4,6 +4,7 @@ mod codec;
 mod config_updater;
 mod handshake;
 mod health;
+mod http_fetch;
 #[cfg(test)]
 #[path = "tests/health_adversarial_tests.rs"]
 mod health_adversarial_tests;
@@ -44,7 +45,8 @@ use bytes::Bytes;
 
 #[allow(unused_imports)]
 pub use config_updater::{
-    ProxyConfigData, fetch_proxy_config, fetch_proxy_config_with_raw, load_proxy_config_cache,
+    ProxyConfigData, fetch_proxy_config, fetch_proxy_config_via_upstream,
+    fetch_proxy_config_with_raw, fetch_proxy_config_with_raw_via_upstream, load_proxy_config_cache,
     me_config_updater, save_proxy_config_cache,
 };
 pub use health::{me_drain_timeout_enforcer, me_health_monitor, me_zombie_writer_watchdog};
@@ -57,7 +59,7 @@ pub use pool::MePool;
 pub use pool_nat::{detect_public_ip, stun_probe};
 pub use registry::ConnRegistry;
 pub use rotation::{MeReinitTrigger, me_reinit_scheduler, me_rotation_task};
-pub use secret::fetch_proxy_secret;
+pub use secret::{fetch_proxy_secret, fetch_proxy_secret_with_upstream};
 pub(crate) use selftest::{bnd_snapshot, timeskew_snapshot, upstream_bnd_snapshots};
 pub use wire::proto_flags_for_tag;
 
