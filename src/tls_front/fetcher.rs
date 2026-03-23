@@ -108,16 +108,28 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     // Session ID: empty
     body.push(0);
 
-    // Cipher suites (common minimal set, TLS1.3 + a few 1.2 fallbacks)
-    let cipher_suites: [u8; 10] = [
-        0x13, 0x01, // TLS_AES_128_GCM_SHA256
-        0x13, 0x02, // TLS_AES_256_GCM_SHA384
-        0x13, 0x03, // TLS_CHACHA20_POLY1305_SHA256
-        0x00, 0x2f, // TLS_RSA_WITH_AES_128_CBC_SHA (legacy)
-        0x00, 0xff, // RENEGOTIATION_INFO_SCSV
+    // Cipher suites:
+    // - TLS1.3 set
+    // - broad TLS1.2 ECDHE set for RSA/ECDSA cert chains
+    // This keeps raw probing compatible with common production frontends that
+    // still negotiate TLS1.2.
+    let cipher_suites: [u16; 11] = [
+        0x1301, // TLS_AES_128_GCM_SHA256
+        0x1302, // TLS_AES_256_GCM_SHA384
+        0x1303, // TLS_CHACHA20_POLY1305_SHA256
+        0xc02b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        0xc02c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        0xcca9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+        0xc02f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        0xcca8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+        0x009e, // TLS_DHE_RSA_WITH_AES_128_GCM_SHA256
+        0x00ff, // TLS_EMPTY_RENEGOTIATION_INFO_SCSV
     ];
-    body.extend_from_slice(&(cipher_suites.len() as u16).to_be_bytes());
-    body.extend_from_slice(&cipher_suites);
+    body.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
+    for suite in cipher_suites {
+        body.extend_from_slice(&suite.to_be_bytes());
+    }
 
     // Compression methods: null only
     body.push(1);
@@ -147,7 +159,7 @@ fn build_client_hello(sni: &str, rng: &SecureRandom) -> Vec<u8> {
     }
 
     // signature_algorithms
-    let sig_algs: [u16; 4] = [0x0804, 0x0805, 0x0403, 0x0503]; // rsa_pss_rsae_sha256/384, ecdsa_secp256r1_sha256, rsa_pkcs1_sha256
+    let sig_algs: [u16; 4] = [0x0804, 0x0805, 0x0403, 0x0503]; // rsa_pss_rsae_sha256/384, ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384
     exts.extend_from_slice(&0x000du16.to_be_bytes());
     exts.extend_from_slice(&((2 + sig_algs.len() * 2) as u16).to_be_bytes());
     exts.extend_from_slice(&(sig_algs.len() as u16 * 2).to_be_bytes());
