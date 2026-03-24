@@ -235,18 +235,9 @@ jobs:
 # Docker
 # ==========================
   docker:
-    name: Docker (${{ matrix.platform }})
+    name: Docker
     runs-on: ubuntu-latest
     needs: [build-gnu, build-musl]
-  
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            artifact: telemt-x86_64-linux-musl
-          - platform: linux/arm64
-            artifact: telemt-aarch64-linux-musl
   
     permissions:
       contents: read
@@ -257,13 +248,17 @@ jobs:
   
       - uses: actions/download-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
           path: dist
   
-      - name: Extract binary
+      - name: Extract binaries
         run: |
-          tar -xzf dist/${{ matrix.artifact }}.tar.gz -C dist
-          chmod +x dist/telemt
+          mkdir bin
+  
+          tar -xzf dist/telemt-x86_64-linux-musl/telemt-x86_64-linux-musl.tar.gz -C bin
+          mv bin/telemt bin/telemt-amd64
+  
+          tar -xzf dist/telemt-aarch64-linux-musl/telemt-aarch64-linux-musl.tar.gz -C bin
+          mv bin/telemt bin/telemt-arm64
   
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -278,14 +273,15 @@ jobs:
         id: vars
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
   
-      - name: Build & Push (per arch)
+      - name: Build & Push (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/${{ github.repository }}:${{ steps.vars.outputs.VERSION }}
             ghcr.io/${{ github.repository }}:latest
           build-args: |
-            BINARY=dist/telemt
+            BINARY_AMD64=bin/telemt-amd64
+            BINARY_ARM64=bin/telemt-arm64
