@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -25,6 +26,7 @@ const ME_ACTIVE_PING_SECS: u64 = 25;
 const ME_ACTIVE_PING_JITTER_SECS: i64 = 5;
 const ME_IDLE_KEEPALIVE_MAX_SECS: u64 = 5;
 const ME_RPC_PROXY_REQ_RESPONSE_WAIT_MS: u64 = 700;
+const ME_PING_TRACKER_CLEANUP_EVERY: u32 = 32;
 
 #[derive(Clone, Copy)]
 enum WriterTeardownMode {
@@ -197,11 +199,11 @@ impl MePool {
         self.registry.register_writer(writer_id, tx.clone()).await;
         self.registry.mark_writer_idle(writer_id).await;
         self.conn_count.fetch_add(1, Ordering::Relaxed);
-        self.writer_available.notify_one();
+        self.notify_writer_epoch();
 
         let reg = self.registry.clone();
         let writers_arc = self.writers_arc();
-        let ping_tracker = self.ping_tracker.clone();
+        let ping_tracker = Arc::new(tokio::sync::Mutex::new(HashMap::<i64, Instant>::new()));
         let ping_tracker_reader = ping_tracker.clone();
         let rtt_stats = self.rtt_stats.clone();
         let stats_reader = self.stats.clone();
@@ -280,6 +282,7 @@ impl MePool {
         let pool_ping = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut ping_id: i64 = rand::random::<i64>();
+            let mut cleanup_tick: u32 = 0;
             let idle_interval_cap = Duration::from_secs(ME_IDLE_KEEPALIVE_MAX_SECS);
             // Per-writer jittered start to avoid phase sync.
             let startup_jitter = if keepalive_enabled {
@@ -339,39 +342,16 @@ impl MePool {
                 p.extend_from_slice(&sent_id.to_le_bytes());
                 {
                     let mut tracker = ping_tracker_ping.lock().await;
-                    let now_epoch_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    let mut run_cleanup = false;
-                    if let Some(pool) = pool_ping.upgrade() {
-                        let last_cleanup_ms = pool
-                            .ping_tracker_last_cleanup_epoch_ms
-                            .load(Ordering::Relaxed);
-                        if now_epoch_ms.saturating_sub(last_cleanup_ms) >= 30_000
-                            && pool
-                                .ping_tracker_last_cleanup_epoch_ms
-                                .compare_exchange(
-                                    last_cleanup_ms,
-                                    now_epoch_ms,
-                                    Ordering::AcqRel,
-                                    Ordering::Relaxed,
-                                )
-                                .is_ok()
-                        {
-                            run_cleanup = true;
-                        }
-                    }
-
-                    if run_cleanup {
+                    cleanup_tick = cleanup_tick.wrapping_add(1);
+                    if cleanup_tick.is_multiple_of(ME_PING_TRACKER_CLEANUP_EVERY) {
                         let before = tracker.len();
-                        tracker.retain(|_, (ts, _)| ts.elapsed() < Duration::from_secs(120));
+                        tracker.retain(|_, ts| ts.elapsed() < Duration::from_secs(120));
                         let expired = before.saturating_sub(tracker.len());
                         if expired > 0 {
                             stats_ping.increment_me_keepalive_timeout_by(expired as u64);
                         }
                     }
-                    tracker.insert(sent_id, (std::time::Instant::now(), writer_id));
+                    tracker.insert(sent_id, std::time::Instant::now());
                 }
                 ping_id = ping_id.wrapping_add(1);
                 stats_ping.increment_me_keepalive_sent();
@@ -594,10 +574,6 @@ impl MePool {
         // The close command below is only a best-effort accelerator for task shutdown.
         // Cleanup progress must never depend on command-channel availability.
         let _ = self.registry.writer_lost(writer_id).await;
-        {
-            let mut tracker = self.ping_tracker.lock().await;
-            tracker.retain(|_, (_, wid)| *wid != writer_id);
-        }
         self.rtt_stats.lock().await.remove(&writer_id);
         if let Some(tx) = close_tx {
             let _ = tx.send(WriterCommand::Close).await;
@@ -610,6 +586,9 @@ impl MePool {
             if trigger_refill && let Some(writer_dc) = removed_dc {
                 self.trigger_immediate_refill_for_dc(addr, writer_dc);
             }
+        }
+        if removed {
+            self.notify_writer_epoch();
         }
         removed
     }

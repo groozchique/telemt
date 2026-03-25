@@ -651,6 +651,9 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
     }
     if old.general.me_route_no_writer_mode != new.general.me_route_no_writer_mode
         || old.general.me_route_no_writer_wait_ms != new.general.me_route_no_writer_wait_ms
+        || old.general.me_route_hybrid_max_wait_ms != new.general.me_route_hybrid_max_wait_ms
+        || old.general.me_route_blocking_send_timeout_ms
+            != new.general.me_route_blocking_send_timeout_ms
         || old.general.me_route_inline_recovery_attempts
             != new.general.me_route_inline_recovery_attempts
         || old.general.me_route_inline_recovery_wait_ms

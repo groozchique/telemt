@@ -26,6 +26,9 @@ use rand::seq::SliceRandom;
 const IDLE_WRITER_PENALTY_MID_SECS: u64 = 45;
 const IDLE_WRITER_PENALTY_HIGH_SECS: u64 = 55;
 const HYBRID_GLOBAL_BURST_PERIOD_ROUNDS: u32 = 4;
+const HYBRID_RECENT_SUCCESS_WINDOW_MS: u64 = 120_000;
+const HYBRID_TIMEOUT_WARN_RATE_LIMIT_MS: u64 = 5_000;
+const HYBRID_RECOVERY_TRIGGER_MIN_INTERVAL_MS: u64 = 5_000;
 const PICK_PENALTY_WARM: u64 = 200;
 const PICK_PENALTY_DRAINING: u64 = 600;
 const PICK_PENALTY_STALE: u64 = 300;
@@ -77,6 +80,7 @@ impl MePool {
         let mut async_recovery_triggered = false;
         let mut hybrid_recovery_round = 0u32;
         let mut hybrid_last_recovery_at: Option<Instant> = None;
+        let mut hybrid_total_deadline: Option<Instant> = None;
         let hybrid_wait_step = self.me_route_no_writer_wait.max(Duration::from_millis(50));
         let mut hybrid_wait_current = hybrid_wait_step;
 
@@ -92,9 +96,13 @@ impl MePool {
                     .tx
                     .try_send(WriterCommand::Data(current_payload.clone()))
                 {
-                    Ok(()) => return Ok(()),
+                    Ok(()) => {
+                        self.note_hybrid_route_success();
+                        return Ok(());
+                    }
                     Err(TrySendError::Full(cmd)) => {
                         if current.tx.send(cmd).await.is_ok() {
+                            self.note_hybrid_route_success();
                             return Ok(());
                         }
                         warn!(writer_id = current.writer_id, "ME writer channel closed");
@@ -182,6 +190,15 @@ impl MePool {
                             continue;
                         }
                         MeRouteNoWriterMode::HybridAsyncPersistent => {
+                            let total_deadline = *hybrid_total_deadline.get_or_insert_with(|| {
+                                Instant::now() + self.hybrid_total_wait_budget()
+                            });
+                            if Instant::now() >= total_deadline {
+                                self.on_hybrid_timeout(total_deadline, routed_dc);
+                                return Err(ProxyError::Proxy(
+                                    "ME writer not available within hybrid timeout".into(),
+                                ));
+                            }
                             if !unknown_target_dc {
                                 self.maybe_trigger_hybrid_recovery(
                                     routed_dc,
@@ -292,6 +309,15 @@ impl MePool {
                         }
                     }
                     MeRouteNoWriterMode::HybridAsyncPersistent => {
+                        let total_deadline = *hybrid_total_deadline
+                            .get_or_insert_with(|| Instant::now() + self.hybrid_total_wait_budget());
+                        if Instant::now() >= total_deadline {
+                            self.on_hybrid_timeout(total_deadline, routed_dc);
+                            return Err(ProxyError::Proxy(
+                                "No ME writers available for target DC within hybrid timeout"
+                                    .into(),
+                            ));
+                        }
                         if !unknown_target_dc {
                             self.maybe_trigger_hybrid_recovery(
                                 routed_dc,
@@ -423,6 +449,7 @@ impl MePool {
                                 "Selected stale ME writer for fallback bind"
                             );
                         }
+                        self.note_hybrid_route_success();
                         return Ok(());
                     }
                     Err(TrySendError::Full(_)) => {
@@ -453,7 +480,18 @@ impl MePool {
                 .increment_me_writer_pick_blocking_fallback_total();
             let effective_our_addr = SocketAddr::new(w.source_ip, our_addr.port());
             let (payload, meta) = build_routed_payload(effective_our_addr);
-            match w.tx.clone().reserve_owned().await {
+            let reserve_result = if let Some(timeout) = self.me_route_blocking_send_timeout {
+                match tokio::time::timeout(timeout, w.tx.clone().reserve_owned()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        self.stats.increment_me_writer_pick_full_total(pick_mode);
+                        continue;
+                    }
+                }
+            } else {
+                w.tx.clone().reserve_owned().await
+            };
+            match reserve_result {
                 Ok(permit) => {
                     if !self.registry.bind_writer(conn_id, w.id, meta).await {
                         debug!(
@@ -471,6 +509,7 @@ impl MePool {
                     if w.generation < self.current_generation() {
                         self.stats.increment_pool_stale_pick_total();
                     }
+                    self.note_hybrid_route_success();
                     return Ok(());
                 }
                 Err(_) => {
@@ -483,7 +522,7 @@ impl MePool {
     }
 
     async fn wait_for_writer_until(&self, deadline: Instant) -> bool {
-        let waiter = self.writer_available.notified();
+        let mut rx = self.writer_epoch.subscribe();
         if !self.writers.read().await.is_empty() {
             return true;
         }
@@ -492,13 +531,14 @@ impl MePool {
             return !self.writers.read().await.is_empty();
         }
         let timeout = deadline.saturating_duration_since(now);
-        if tokio::time::timeout(timeout, waiter).await.is_ok() {
-            return true;
+        if tokio::time::timeout(timeout, rx.changed()).await.is_ok() {
+            return !self.writers.read().await.is_empty();
         }
         !self.writers.read().await.is_empty()
     }
 
     async fn wait_for_candidate_until(&self, routed_dc: i32, deadline: Instant) -> bool {
+        let mut rx = self.writer_epoch.subscribe();
         loop {
             if self.has_candidate_for_target_dc(routed_dc).await {
                 return true;
@@ -509,7 +549,6 @@ impl MePool {
                 return self.has_candidate_for_target_dc(routed_dc).await;
             }
 
-            let waiter = self.writer_available.notified();
             if self.has_candidate_for_target_dc(routed_dc).await {
                 return true;
             }
@@ -517,7 +556,7 @@ impl MePool {
             if remaining.is_zero() {
                 return self.has_candidate_for_target_dc(routed_dc).await;
             }
-            if tokio::time::timeout(remaining, waiter).await.is_err() {
+            if tokio::time::timeout(remaining, rx.changed()).await.is_err() {
                 return self.has_candidate_for_target_dc(routed_dc).await;
             }
         }
@@ -587,6 +626,10 @@ impl MePool {
         hybrid_last_recovery_at: &mut Option<Instant>,
         hybrid_wait_step: Duration,
     ) {
+        if !self.try_consume_hybrid_recovery_trigger_slot(HYBRID_RECOVERY_TRIGGER_MIN_INTERVAL_MS)
+        {
+            return;
+        }
         if let Some(last) = *hybrid_last_recovery_at
             && last.elapsed() < hybrid_wait_step
         {
@@ -600,6 +643,71 @@ impl MePool {
         }
         *hybrid_recovery_round = round.saturating_add(1);
         *hybrid_last_recovery_at = Some(Instant::now());
+    }
+
+    fn hybrid_total_wait_budget(&self) -> Duration {
+        let base = self.me_route_hybrid_max_wait.max(Duration::from_millis(50));
+        let now_ms = Self::now_epoch_millis();
+        let last_success_ms = self.me_route_last_success_epoch_ms.load(Ordering::Relaxed);
+        if last_success_ms != 0
+            && now_ms.saturating_sub(last_success_ms) <= HYBRID_RECENT_SUCCESS_WINDOW_MS
+        {
+            return base.saturating_mul(2);
+        }
+        base
+    }
+
+    fn note_hybrid_route_success(&self) {
+        self.me_route_last_success_epoch_ms
+            .store(Self::now_epoch_millis(), Ordering::Relaxed);
+    }
+
+    fn on_hybrid_timeout(&self, deadline: Instant, routed_dc: i32) {
+        self.stats.increment_me_hybrid_timeout_total();
+        let now_ms = Self::now_epoch_millis();
+        let mut last_warn_ms = self
+            .me_route_hybrid_timeout_warn_epoch_ms
+            .load(Ordering::Relaxed);
+        while now_ms.saturating_sub(last_warn_ms) >= HYBRID_TIMEOUT_WARN_RATE_LIMIT_MS {
+            match self.me_route_hybrid_timeout_warn_epoch_ms.compare_exchange_weak(
+                last_warn_ms,
+                now_ms,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    warn!(
+                        routed_dc,
+                        budget_ms = self.hybrid_total_wait_budget().as_millis() as u64,
+                        elapsed_ms = deadline.elapsed().as_millis() as u64,
+                        "ME hybrid route timeout reached"
+                    );
+                    break;
+                }
+                Err(actual) => last_warn_ms = actual,
+            }
+        }
+    }
+
+    fn try_consume_hybrid_recovery_trigger_slot(&self, min_interval_ms: u64) -> bool {
+        let now_ms = Self::now_epoch_millis();
+        let mut last_trigger_ms = self
+            .me_async_recovery_last_trigger_epoch_ms
+            .load(Ordering::Relaxed);
+        loop {
+            if now_ms.saturating_sub(last_trigger_ms) < min_interval_ms {
+                return false;
+            }
+            match self.me_async_recovery_last_trigger_epoch_ms.compare_exchange_weak(
+                last_trigger_ms,
+                now_ms,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => last_trigger_ms = actual,
+            }
+        }
     }
 
     pub async fn send_close(self: &Arc<Self>, conn_id: u64) -> Result<()> {

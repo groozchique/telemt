@@ -2320,6 +2320,20 @@ async fn render_metrics(stats: &Stats, config: &ProxyConfig, ip_tracker: &UserIp
     );
     let _ = writeln!(
         out,
+        "# HELP telemt_me_hybrid_timeout_total ME hybrid route timeouts after bounded retry window"
+    );
+    let _ = writeln!(out, "# TYPE telemt_me_hybrid_timeout_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_me_hybrid_timeout_total {}",
+        if me_allows_normal {
+            stats.get_me_hybrid_timeout_total()
+        } else {
+            0
+        }
+    );
+    let _ = writeln!(
+        out,
         "# HELP telemt_me_async_recovery_trigger_total Async ME recovery trigger attempts from route path"
     );
     let _ = writeln!(out, "# TYPE telemt_me_async_recovery_trigger_total counter");

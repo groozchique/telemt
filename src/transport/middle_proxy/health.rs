@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::RngExt;
+use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use crate::config::MeFloorMode;
@@ -78,6 +79,7 @@ pub async fn me_health_monitor(pool: Arc<MePool>, rng: Arc<SecureRandom>, _min_c
         };
         tokio::time::sleep(interval).await;
         pool.prune_closed_writers().await;
+        pool.sweep_endpoint_quarantine().await;
         reap_draining_writers(&pool, &mut drain_warn_next_allowed).await;
         let v4_degraded = check_family(
             IpFamily::V4,
@@ -365,7 +367,8 @@ async fn check_family(
         endpoints.sort_unstable();
         endpoints.dedup();
     }
-    let mut reconnect_budget = health_reconnect_budget(pool, dc_endpoints.len());
+    let reconnect_budget = health_reconnect_budget(pool, dc_endpoints.len());
+    let reconnect_sem = Arc::new(Semaphore::new(reconnect_budget));
 
     if pool.floor_mode() == MeFloorMode::Static {
         adaptive_idle_since.clear();
@@ -461,7 +464,7 @@ async fn check_family(
                 required,
                 outage_backoff,
                 outage_next_attempt,
-                &mut reconnect_budget,
+                &reconnect_sem,
             )
             .await;
             continue;
@@ -521,7 +524,7 @@ async fn check_family(
         family_degraded = true;
 
         let now = Instant::now();
-        if reconnect_budget == 0 {
+        if reconnect_sem.available_permits() == 0 {
             let base_ms = pool.me_reconnect_backoff_base.as_millis() as u64;
             let next_ms = (*backoff.get(&key).unwrap_or(&base_ms)).max(base_ms);
             let jitter = next_ms / JITTER_FRAC_NUM;
@@ -567,10 +570,9 @@ async fn check_family(
 
         let mut restored = 0usize;
         for _ in 0..missing {
-            if reconnect_budget == 0 {
+            let Ok(reconnect_permit) = reconnect_sem.clone().try_acquire_owned() else {
                 break;
-            }
-            reconnect_budget = reconnect_budget.saturating_sub(1);
+            };
             if pool.active_contour_writer_count_total().await
                 >= floor_plan.active_cap_effective_total
             {
@@ -621,6 +623,7 @@ async fn check_family(
                     debug!(dc = %dc, ?family, "ME reconnect timed out");
                 }
             }
+            drop(reconnect_permit);
         }
 
         let now_alive = alive + restored;
@@ -1188,7 +1191,7 @@ async fn recover_single_endpoint_outage(
     required: usize,
     outage_backoff: &mut HashMap<(i32, IpFamily), u64>,
     outage_next_attempt: &mut HashMap<(i32, IpFamily), Instant>,
-    reconnect_budget: &mut usize,
+    reconnect_sem: &Arc<Semaphore>,
 ) {
     let now = Instant::now();
     if let Some(ts) = outage_next_attempt.get(&key)
@@ -1198,7 +1201,7 @@ async fn recover_single_endpoint_outage(
     }
 
     let (min_backoff_ms, max_backoff_ms) = pool.single_endpoint_outage_backoff_bounds_ms();
-    if *reconnect_budget == 0 {
+    if reconnect_sem.available_permits() == 0 {
         outage_next_attempt.insert(key, now + Duration::from_millis(min_backoff_ms.max(250)));
         debug!(
             dc = %key.0,
@@ -1209,7 +1212,17 @@ async fn recover_single_endpoint_outage(
         );
         return;
     }
-    *reconnect_budget = (*reconnect_budget).saturating_sub(1);
+    let Ok(_reconnect_permit) = reconnect_sem.clone().try_acquire_owned() else {
+        outage_next_attempt.insert(key, now + Duration::from_millis(min_backoff_ms.max(250)));
+        debug!(
+            dc = %key.0,
+            family = ?key.1,
+            %endpoint,
+            required,
+            "Single-endpoint outage reconnect deferred by semaphore saturation"
+        );
+        return;
+    };
     pool.stats
         .increment_me_single_endpoint_outage_reconnect_attempt_total();
 
@@ -1687,6 +1700,8 @@ mod tests {
             general.me_warn_rate_limit_ms,
             MeRouteNoWriterMode::default(),
             general.me_route_no_writer_wait_ms,
+            general.me_route_hybrid_max_wait_ms,
+            general.me_route_blocking_send_timeout_ms,
             general.me_route_inline_recovery_attempts,
             general.me_route_inline_recovery_wait_ms,
         )

@@ -234,6 +234,7 @@ pub struct Stats {
     me_writer_restored_same_endpoint_total: AtomicU64,
     me_writer_restored_fallback_total: AtomicU64,
     me_no_writer_failfast_total: AtomicU64,
+    me_hybrid_timeout_total: AtomicU64,
     me_async_recovery_trigger_total: AtomicU64,
     me_inline_recovery_total: AtomicU64,
     ip_reservation_rollback_tcp_limit_total: AtomicU64,
@@ -1203,6 +1204,12 @@ impl Stats {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
+    pub fn increment_me_hybrid_timeout_total(&self) {
+        if self.telemetry_me_allows_normal() {
+            self.me_hybrid_timeout_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub fn increment_me_async_recovery_trigger_total(&self) {
         if self.telemetry_me_allows_normal() {
             self.me_async_recovery_trigger_total
@@ -1875,6 +1882,9 @@ impl Stats {
     }
     pub fn get_me_no_writer_failfast_total(&self) -> u64 {
         self.me_no_writer_failfast_total.load(Ordering::Relaxed)
+    }
+    pub fn get_me_hybrid_timeout_total(&self) -> u64 {
+        self.me_hybrid_timeout_total.load(Ordering::Relaxed)
     }
     pub fn get_me_async_recovery_trigger_total(&self) -> u64 {
         self.me_async_recovery_trigger_total.load(Ordering::Relaxed)

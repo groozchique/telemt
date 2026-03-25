@@ -8,7 +8,8 @@ use std::sync::atomic::{
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use arc_swap::ArcSwap;
+use tokio::sync::{Mutex, RwLock, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{
@@ -69,6 +70,10 @@ impl WriterContour {
     }
 
     pub(super) fn from_u8(value: u8) -> Self {
+        debug_assert!(
+            value <= Self::Draining as u8,
+            "Unexpected WriterContour discriminant: {value}"
+        );
         match value {
             0 => Self::Warm,
             1 => Self::Active,
@@ -85,6 +90,33 @@ pub(crate) enum MeFamilyRuntimeState {
     Degraded = 1,
     Suppressed = 2,
     Recovering = 3,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FamilyHealthSnapshot {
+    pub(crate) state: MeFamilyRuntimeState,
+    pub(crate) state_since_epoch_secs: u64,
+    pub(crate) suppressed_until_epoch_secs: u64,
+    pub(crate) fail_streak: u32,
+    pub(crate) recover_success_streak: u32,
+}
+
+impl FamilyHealthSnapshot {
+    fn new(
+        state: MeFamilyRuntimeState,
+        state_since_epoch_secs: u64,
+        suppressed_until_epoch_secs: u64,
+        fail_streak: u32,
+        recover_success_streak: u32,
+    ) -> Self {
+        Self {
+            state,
+            state_since_epoch_secs,
+            suppressed_until_epoch_secs,
+            fail_streak,
+            recover_success_streak,
+        }
+    }
 }
 
 impl MeFamilyRuntimeState {
@@ -214,13 +246,11 @@ pub struct MePool {
     pub(super) endpoint_dc_map: Arc<RwLock<HashMap<SocketAddr, Option<i32>>>>,
     pub(super) default_dc: AtomicI32,
     pub(super) next_writer_id: AtomicU64,
-    pub(super) ping_tracker: Arc<Mutex<HashMap<i64, (std::time::Instant, u64)>>>,
-    pub(super) ping_tracker_last_cleanup_epoch_ms: AtomicU64,
     pub(super) rtt_stats: Arc<Mutex<HashMap<u64, (f64, f64)>>>,
     pub(super) nat_reflection_cache: Arc<Mutex<NatReflectionCache>>,
     pub(super) nat_reflection_singleflight_v4: Arc<Mutex<()>>,
     pub(super) nat_reflection_singleflight_v6: Arc<Mutex<()>>,
-    pub(super) writer_available: Arc<Notify>,
+    pub(super) writer_epoch: watch::Sender<u64>,
     pub(super) refill_inflight: Arc<Mutex<HashSet<RefillEndpointKey>>>,
     pub(super) refill_inflight_dc: Arc<Mutex<HashSet<RefillDcKey>>>,
     pub(super) conn_count: AtomicUsize,
@@ -259,21 +289,18 @@ pub struct MePool {
     pub(super) me_reader_route_data_wait_ms: Arc<AtomicU64>,
     pub(super) me_route_no_writer_mode: AtomicU8,
     pub(super) me_route_no_writer_wait: Duration,
+    pub(super) me_route_hybrid_max_wait: Duration,
+    pub(super) me_route_blocking_send_timeout: Option<Duration>,
+    pub(super) me_route_last_success_epoch_ms: AtomicU64,
+    pub(super) me_route_hybrid_timeout_warn_epoch_ms: AtomicU64,
+    pub(super) me_async_recovery_last_trigger_epoch_ms: AtomicU64,
     pub(super) me_route_inline_recovery_attempts: u32,
     pub(super) me_route_inline_recovery_wait: Duration,
     pub(super) me_health_interval_ms_unhealthy: AtomicU64,
     pub(super) me_health_interval_ms_healthy: AtomicU64,
     pub(super) me_warn_rate_limit_ms: AtomicU64,
-    pub(super) me_family_v4_runtime_state: AtomicU8,
-    pub(super) me_family_v6_runtime_state: AtomicU8,
-    pub(super) me_family_v4_state_since_epoch_secs: AtomicU64,
-    pub(super) me_family_v6_state_since_epoch_secs: AtomicU64,
-    pub(super) me_family_v4_suppressed_until_epoch_secs: AtomicU64,
-    pub(super) me_family_v6_suppressed_until_epoch_secs: AtomicU64,
-    pub(super) me_family_v4_fail_streak: AtomicU32,
-    pub(super) me_family_v6_fail_streak: AtomicU32,
-    pub(super) me_family_v4_recover_success_streak: AtomicU32,
-    pub(super) me_family_v6_recover_success_streak: AtomicU32,
+    pub(super) family_health_v4: ArcSwap<FamilyHealthSnapshot>,
+    pub(super) family_health_v6: ArcSwap<FamilyHealthSnapshot>,
     pub(super) me_last_drain_gate_route_quorum_ok: AtomicBool,
     pub(super) me_last_drain_gate_redundancy_ok: AtomicBool,
     pub(super) me_last_drain_gate_block_reason: AtomicU8,
@@ -396,6 +423,8 @@ impl MePool {
         me_warn_rate_limit_ms: u64,
         me_route_no_writer_mode: MeRouteNoWriterMode,
         me_route_no_writer_wait_ms: u64,
+        me_route_hybrid_max_wait_ms: u64,
+        me_route_blocking_send_timeout_ms: u64,
         me_route_inline_recovery_attempts: u32,
         me_route_inline_recovery_wait_ms: u64,
     ) -> Arc<Self> {
@@ -410,6 +439,8 @@ impl MePool {
             me_route_backpressure_high_timeout_ms,
             me_route_backpressure_high_watermark_pct,
         );
+        let (writer_epoch, _) = watch::channel(0u64);
+        let now_epoch_secs = Self::now_epoch_secs();
         Arc::new(Self {
             registry,
             writers: Arc::new(RwLock::new(Vec::new())),
@@ -527,13 +558,11 @@ impl MePool {
             endpoint_dc_map: Arc::new(RwLock::new(endpoint_dc_map)),
             default_dc: AtomicI32::new(default_dc.unwrap_or(2)),
             next_writer_id: AtomicU64::new(1),
-            ping_tracker: Arc::new(Mutex::new(HashMap::new())),
-            ping_tracker_last_cleanup_epoch_ms: AtomicU64::new(0),
             rtt_stats: Arc::new(Mutex::new(HashMap::new())),
             nat_reflection_cache: Arc::new(Mutex::new(NatReflectionCache::default())),
             nat_reflection_singleflight_v4: Arc::new(Mutex::new(())),
             nat_reflection_singleflight_v6: Arc::new(Mutex::new(())),
-            writer_available: Arc::new(Notify::new()),
+            writer_epoch,
             refill_inflight: Arc::new(Mutex::new(HashSet::new())),
             refill_inflight_dc: Arc::new(Mutex::new(HashSet::new())),
             conn_count: AtomicUsize::new(0),
@@ -585,25 +614,40 @@ impl MePool {
             me_reader_route_data_wait_ms: Arc::new(AtomicU64::new(me_reader_route_data_wait_ms)),
             me_route_no_writer_mode: AtomicU8::new(me_route_no_writer_mode.as_u8()),
             me_route_no_writer_wait: Duration::from_millis(me_route_no_writer_wait_ms),
+            me_route_hybrid_max_wait: Duration::from_millis(me_route_hybrid_max_wait_ms.max(50)),
+            me_route_blocking_send_timeout: if me_route_blocking_send_timeout_ms == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(
+                    me_route_blocking_send_timeout_ms.min(5_000),
+                ))
+            },
+            me_route_last_success_epoch_ms: AtomicU64::new(0),
+            me_route_hybrid_timeout_warn_epoch_ms: AtomicU64::new(0),
+            me_async_recovery_last_trigger_epoch_ms: AtomicU64::new(0),
             me_route_inline_recovery_attempts,
             me_route_inline_recovery_wait: Duration::from_millis(me_route_inline_recovery_wait_ms),
             me_health_interval_ms_unhealthy: AtomicU64::new(me_health_interval_ms_unhealthy.max(1)),
             me_health_interval_ms_healthy: AtomicU64::new(me_health_interval_ms_healthy.max(1)),
             me_warn_rate_limit_ms: AtomicU64::new(me_warn_rate_limit_ms.max(1)),
-            me_family_v4_runtime_state: AtomicU8::new(MeFamilyRuntimeState::Healthy as u8),
-            me_family_v6_runtime_state: AtomicU8::new(MeFamilyRuntimeState::Healthy as u8),
-            me_family_v4_state_since_epoch_secs: AtomicU64::new(Self::now_epoch_secs()),
-            me_family_v6_state_since_epoch_secs: AtomicU64::new(Self::now_epoch_secs()),
-            me_family_v4_suppressed_until_epoch_secs: AtomicU64::new(0),
-            me_family_v6_suppressed_until_epoch_secs: AtomicU64::new(0),
-            me_family_v4_fail_streak: AtomicU32::new(0),
-            me_family_v6_fail_streak: AtomicU32::new(0),
-            me_family_v4_recover_success_streak: AtomicU32::new(0),
-            me_family_v6_recover_success_streak: AtomicU32::new(0),
+            family_health_v4: ArcSwap::from_pointee(FamilyHealthSnapshot::new(
+                MeFamilyRuntimeState::Healthy,
+                now_epoch_secs,
+                0,
+                0,
+                0,
+            )),
+            family_health_v6: ArcSwap::from_pointee(FamilyHealthSnapshot::new(
+                MeFamilyRuntimeState::Healthy,
+                now_epoch_secs,
+                0,
+                0,
+                0,
+            )),
             me_last_drain_gate_route_quorum_ok: AtomicBool::new(false),
             me_last_drain_gate_redundancy_ok: AtomicBool::new(false),
             me_last_drain_gate_block_reason: AtomicU8::new(MeDrainGateReason::Open as u8),
-            me_last_drain_gate_updated_at_epoch_secs: AtomicU64::new(Self::now_epoch_secs()),
+            me_last_drain_gate_updated_at_epoch_secs: AtomicU64::new(now_epoch_secs),
             runtime_ready: AtomicBool::new(false),
             preferred_endpoints_by_dc: Arc::new(RwLock::new(preferred_endpoints_by_dc)),
         })
@@ -621,6 +665,19 @@ impl MePool {
         self.runtime_ready.load(Ordering::Relaxed)
     }
 
+    pub(super) fn now_epoch_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    pub(super) fn notify_writer_epoch(&self) {
+        let _ = self.writer_epoch.send_modify(|epoch| {
+            *epoch = epoch.wrapping_add(1);
+        });
+    }
+
     #[allow(dead_code)]
     pub(super) fn set_family_runtime_state(
         &self,
@@ -631,82 +688,51 @@ impl MePool {
         fail_streak: u32,
         recover_success_streak: u32,
     ) {
+        let snapshot = Arc::new(FamilyHealthSnapshot::new(
+            state,
+            state_since_epoch_secs,
+            suppressed_until_epoch_secs,
+            fail_streak,
+            recover_success_streak,
+        ));
         match family {
-            IpFamily::V4 => {
-                self.me_family_v4_runtime_state
-                    .store(state as u8, Ordering::Relaxed);
-                self.me_family_v4_state_since_epoch_secs
-                    .store(state_since_epoch_secs, Ordering::Relaxed);
-                self.me_family_v4_suppressed_until_epoch_secs
-                    .store(suppressed_until_epoch_secs, Ordering::Relaxed);
-                self.me_family_v4_fail_streak
-                    .store(fail_streak, Ordering::Relaxed);
-                self.me_family_v4_recover_success_streak
-                    .store(recover_success_streak, Ordering::Relaxed);
-            }
-            IpFamily::V6 => {
-                self.me_family_v6_runtime_state
-                    .store(state as u8, Ordering::Relaxed);
-                self.me_family_v6_state_since_epoch_secs
-                    .store(state_since_epoch_secs, Ordering::Relaxed);
-                self.me_family_v6_suppressed_until_epoch_secs
-                    .store(suppressed_until_epoch_secs, Ordering::Relaxed);
-                self.me_family_v6_fail_streak
-                    .store(fail_streak, Ordering::Relaxed);
-                self.me_family_v6_recover_success_streak
-                    .store(recover_success_streak, Ordering::Relaxed);
-            }
+            IpFamily::V4 => self.family_health_v4.store(snapshot),
+            IpFamily::V6 => self.family_health_v6.store(snapshot),
         }
     }
 
     pub(crate) fn family_runtime_state(&self, family: IpFamily) -> MeFamilyRuntimeState {
         match family {
-            IpFamily::V4 => MeFamilyRuntimeState::from_u8(
-                self.me_family_v4_runtime_state.load(Ordering::Relaxed),
-            ),
-            IpFamily::V6 => MeFamilyRuntimeState::from_u8(
-                self.me_family_v6_runtime_state.load(Ordering::Relaxed),
-            ),
+            IpFamily::V4 => self.family_health_v4.load().state,
+            IpFamily::V6 => self.family_health_v6.load().state,
         }
     }
 
     pub(crate) fn family_runtime_state_since_epoch_secs(&self, family: IpFamily) -> u64 {
         match family {
-            IpFamily::V4 => self
-                .me_family_v4_state_since_epoch_secs
-                .load(Ordering::Relaxed),
-            IpFamily::V6 => self
-                .me_family_v6_state_since_epoch_secs
-                .load(Ordering::Relaxed),
+            IpFamily::V4 => self.family_health_v4.load().state_since_epoch_secs,
+            IpFamily::V6 => self.family_health_v6.load().state_since_epoch_secs,
         }
     }
 
     pub(crate) fn family_suppressed_until_epoch_secs(&self, family: IpFamily) -> u64 {
         match family {
-            IpFamily::V4 => self
-                .me_family_v4_suppressed_until_epoch_secs
-                .load(Ordering::Relaxed),
-            IpFamily::V6 => self
-                .me_family_v6_suppressed_until_epoch_secs
-                .load(Ordering::Relaxed),
+            IpFamily::V4 => self.family_health_v4.load().suppressed_until_epoch_secs,
+            IpFamily::V6 => self.family_health_v6.load().suppressed_until_epoch_secs,
         }
     }
 
     pub(crate) fn family_fail_streak(&self, family: IpFamily) -> u32 {
         match family {
-            IpFamily::V4 => self.me_family_v4_fail_streak.load(Ordering::Relaxed),
-            IpFamily::V6 => self.me_family_v6_fail_streak.load(Ordering::Relaxed),
+            IpFamily::V4 => self.family_health_v4.load().fail_streak,
+            IpFamily::V6 => self.family_health_v6.load().fail_streak,
         }
     }
 
     pub(crate) fn family_recover_success_streak(&self, family: IpFamily) -> u32 {
         match family {
-            IpFamily::V4 => self
-                .me_family_v4_recover_success_streak
-                .load(Ordering::Relaxed),
-            IpFamily::V6 => self
-                .me_family_v6_recover_success_streak
-                .load(Ordering::Relaxed),
+            IpFamily::V4 => self.family_health_v4.load().recover_success_streak,
+            IpFamily::V6 => self.family_health_v6.load().recover_success_streak,
         }
     }
 
@@ -818,6 +844,9 @@ impl MePool {
         self.me_instadrain.store(instadrain, Ordering::Relaxed);
         self.me_pool_drain_threshold
             .store(pool_drain_threshold, Ordering::Relaxed);
+        // Runtime soft-evict knobs are updated lock-free to keep control-plane
+        // writes non-blocking; readers observe a short eventual-consistency
+        // window by design.
         self.me_pool_drain_soft_evict_enabled
             .store(pool_drain_soft_evict_enabled, Ordering::Relaxed);
         self.me_pool_drain_soft_evict_grace_secs
@@ -1574,6 +1603,22 @@ impl MePool {
         let preferred = Self::build_preferred_endpoints_by_dc(&self.decision, &map_v4, &map_v6);
         *self.endpoint_dc_map.write().await = rebuilt;
         *self.preferred_endpoints_by_dc.write().await = preferred;
+        let configured_endpoints = self
+            .endpoint_dc_map
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect::<HashSet<SocketAddr>>();
+        {
+            let mut quarantine = self.endpoint_quarantine.lock().await;
+            let now = Instant::now();
+            quarantine.retain(|addr, expiry| *expiry > now && configured_endpoints.contains(addr));
+        }
+        {
+            let mut kdf_fp = self.kdf_material_fingerprint.write().await;
+            kdf_fp.retain(|addr, _| configured_endpoints.contains(addr));
+        }
     }
 
     pub(super) async fn preferred_endpoints_for_dc(&self, dc: i32) -> Vec<SocketAddr> {

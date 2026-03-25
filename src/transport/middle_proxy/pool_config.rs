@@ -72,7 +72,7 @@ impl MePool {
         }
         if changed {
             self.rebuild_endpoint_dc_map().await;
-            self.writer_available.notify_waiters();
+            self.notify_writer_epoch();
         }
         if changed {
             SnapshotApplyOutcome::AppliedChanged

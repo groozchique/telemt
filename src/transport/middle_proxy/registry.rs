@@ -292,6 +292,12 @@ impl ConnRegistry {
 
     pub async fn bind_writer(&self, conn_id: u64, writer_id: u64, meta: ConnMeta) -> bool {
         let mut inner = self.inner.write().await;
+        // ROUTING IS THE SOURCE OF TRUTH:
+        // never keep/attach writer binding for a connection that is already
+        // absent from the routing table.
+        if !inner.map.contains_key(&conn_id) {
+            return false;
+        }
         if !inner.writers.contains_key(&writer_id) {
             return false;
         }
@@ -382,9 +388,39 @@ impl ConnRegistry {
     }
 
     pub async fn get_writer(&self, conn_id: u64) -> Option<ConnWriter> {
-        let inner = self.inner.read().await;
-        let writer_id = inner.writer_for_conn.get(&conn_id).cloned()?;
-        let writer = inner.writers.get(&writer_id).cloned()?;
+        let mut inner = self.inner.write().await;
+        // ROUTING IS THE SOURCE OF TRUTH:
+        // stale bindings are ignored and lazily cleaned when routing no longer
+        // contains the connection.
+        if !inner.map.contains_key(&conn_id) {
+            inner.meta.remove(&conn_id);
+            if let Some(stale_writer_id) = inner.writer_for_conn.remove(&conn_id)
+                && let Some(conns) = inner.conns_for_writer.get_mut(&stale_writer_id)
+            {
+                conns.remove(&conn_id);
+                if conns.is_empty() {
+                    inner
+                        .writer_idle_since_epoch_secs
+                        .insert(stale_writer_id, Self::now_epoch_secs());
+                }
+            }
+            return None;
+        }
+
+        let writer_id = inner.writer_for_conn.get(&conn_id).copied()?;
+        let Some(writer) = inner.writers.get(&writer_id).cloned() else {
+            inner.writer_for_conn.remove(&conn_id);
+            inner.meta.remove(&conn_id);
+            if let Some(conns) = inner.conns_for_writer.get_mut(&writer_id) {
+                conns.remove(&conn_id);
+                if conns.is_empty() {
+                    inner
+                        .writer_idle_since_epoch_secs
+                        .insert(writer_id, Self::now_epoch_secs());
+                }
+            }
+            return None;
+        };
         Some(ConnWriter {
             writer_id,
             tx: writer,
