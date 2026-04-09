@@ -148,10 +148,9 @@ Judgment should be exercised with restraint, consistency, and institutional resp
 
 All decisions are expected to serve the durability, clarity, and integrity of Telemt.
 
-> **Ordnung ist Voraussetzung der Funktion.**
+> **Klarheit vor Zustimmung - Bestand vor Beifall**
 
-> Order is the precondition of function.
-
+> Clarity before approval - passed before applause
 ---
 
 ## Enforcement
@@ -184,7 +183,7 @@ Telemt is built on discipline, structure, and shared intent.
 - Rigor is expected.
 - Help is part of the work.
 
-> **Ordnung ist Voraussetzung der Freiheit.**
+> **Ordnung ist Voraussetzung der Freiheit**
 
 - If you contribute — contribute with care.
 - If you speak — speak with substance.
@@ -201,9 +200,9 @@ Systems outlive intentions.
 
 There is no neutral infrastructure, only infrastructure shaped well or poorly.
 
-> **Jedes System trägt Verantwortung.**
+> **Ordnung → Umsetzung → Ergebnis**
 
-> Every system carries responsibility.
+> Order → Implementation → Result
 
 - Stability requires discipline.
 - Freedom requires structure.
