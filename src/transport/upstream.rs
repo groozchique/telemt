@@ -816,7 +816,11 @@ impl UpstreamManager {
                 .and_then(UpstreamState::dc_array_idx)
                 .map(|dc_array_idx| state.dc_ip_pref[dc_array_idx])
                 .unwrap_or(IpPreference::Unknown);
-            (state.config.clone(), Some(state.bind_rr.clone()), dc_preference)
+            (
+                state.config.clone(),
+                Some(state.bind_rr.clone()),
+                dc_preference,
+            )
         };
 
         if let Some(s) = scope {
@@ -854,7 +858,11 @@ impl UpstreamManager {
                 .and_then(UpstreamState::dc_array_idx)
                 .map(|dc_array_idx| state.dc_ip_pref[dc_array_idx])
                 .unwrap_or(IpPreference::Unknown);
-            (state.config.clone(), Some(state.bind_rr.clone()), dc_preference)
+            (
+                state.config.clone(),
+                Some(state.bind_rr.clone()),
+                dc_preference,
+            )
         };
 
         // Set scope for configuration copy
@@ -1753,9 +1761,8 @@ impl UpstreamManager {
                         }
 
                         let rotation_key = (i, group.dc_idx, is_primary);
-                        let start_idx =
-                            *endpoint_rotation.entry(rotation_key).or_insert(0)
-                                % filtered_endpoints.len();
+                        let start_idx = *endpoint_rotation.entry(rotation_key).or_insert(0)
+                            % filtered_endpoints.len();
                         let mut next_idx = (start_idx + 1) % filtered_endpoints.len();
 
                         for step in 0..filtered_endpoints.len() {
@@ -2034,8 +2041,8 @@ mod tests {
                 enabled: true,
                 scopes: String::new(),
                 selected_scope: String::new(),
-            ipv4: None,
-            ipv6: None,
+                ipv4: None,
+                ipv6: None,
             }],
             1,
             100,

@@ -120,11 +120,7 @@ pub(crate) async fn bind_listeners(
                 if config.general.links.public_host.is_none()
                     && !config.general.links.show.is_empty()
                 {
-                    let link_port = config
-                        .general
-                        .links
-                        .public_port
-                        .unwrap_or(listener_port);
+                    let link_port = config.general.links.public_port.unwrap_or(listener_port);
                     print_proxy_links(&public_host, link_port, config);
                 }
 

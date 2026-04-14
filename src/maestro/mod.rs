@@ -83,7 +83,9 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
 // Shared maestro startup and main loop. `drop_after_bind` runs on Unix after listeners are bound
 // (for privilege drop); it is a no-op on other platforms.
-async fn run_telemt_core(drop_after_bind: impl FnOnce()) -> std::result::Result<(), Box<dyn std::error::Error>> {
+async fn run_telemt_core(
+    drop_after_bind: impl FnOnce(),
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let process_started_at = Instant::now();
     let process_started_at_epoch_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -819,11 +821,7 @@ async fn run_inner(
 
     run_telemt_core(|| {
         if user.is_some() || group.is_some() {
-            if let Err(e) = drop_privileges(
-                user.as_deref(),
-                group.as_deref(),
-                _pid_file.as_ref(),
-            ) {
+            if let Err(e) = drop_privileges(user.as_deref(), group.as_deref(), _pid_file.as_ref()) {
                 error!(error = %e, "Failed to drop privileges");
                 std::process::exit(1);
             }

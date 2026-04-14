@@ -384,9 +384,7 @@ impl ProxyConfig {
         // Backward compatibility: legacy top-level beobachten* keys.
         // Prefer `[general].*` when both are present.
         let mut legacy_beobachten_applied = false;
-        if !beobachten_is_explicit
-            && let Some(value) = legacy_top_level_beobachten.as_ref()
-        {
+        if !beobachten_is_explicit && let Some(value) = legacy_top_level_beobachten.as_ref() {
             let parsed = value.as_bool().ok_or_else(|| {
                 ProxyError::Config("beobachten (top-level) must be a boolean".to_string())
             })?;
@@ -433,9 +431,7 @@ impl ProxyConfig {
             legacy_beobachten_applied = true;
         }
         if legacy_beobachten_applied {
-            warn!(
-                "top-level beobachten* keys are deprecated; use general.beobachten* instead"
-            );
+            warn!("top-level beobachten* keys are deprecated; use general.beobachten* instead");
         }
 
         let legacy_nat_stun = config.general.middle_proxy_nat_stun.take();
