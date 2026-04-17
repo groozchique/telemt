@@ -77,6 +77,8 @@ COPY config.toml /app/config.toml
 
 EXPOSE 443 9090 9091
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
+
 ENTRYPOINT ["/app/telemt"]
 CMD ["config.toml"]
 
@@ -93,6 +95,8 @@ COPY config.toml /app/config.toml
 USER nonroot:nonroot
 
 EXPOSE 443 9090 9091
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/telemt", "healthcheck", "/app/config.toml", "--mode", "liveness"]
 
 ENTRYPOINT ["/app/telemt"]
 CMD ["config.toml"]
