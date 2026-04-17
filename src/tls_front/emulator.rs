@@ -253,7 +253,18 @@ pub fn build_emulated_server_hello(
     }
 
     // --- ApplicationData (fake encrypted records) ---
-    let mut sizes = jitter_and_clamp_sizes(&emulated_app_data_sizes(cached), rng);
+    let mut sizes = {
+        let base_sizes = emulated_app_data_sizes(cached);
+        match cached.behavior_profile.source {
+            TlsProfileSource::Raw | TlsProfileSource::Merged => base_sizes
+                .into_iter()
+                .map(|size| size.clamp(MIN_APP_DATA, MAX_APP_DATA))
+                .collect(),
+            TlsProfileSource::Default | TlsProfileSource::Rustls => {
+                jitter_and_clamp_sizes(&base_sizes, rng)
+            }
+        }
+    };
     let compact_payload = cached
         .cert_info
         .as_ref()
