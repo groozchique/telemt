@@ -729,6 +729,14 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub me_socks_kdf_policy: MeSocksKdfPolicy,
 
+    /// Enable route-level ME backpressure controls in reader fairness path.
+    #[serde(default = "default_me_route_backpressure_enabled")]
+    pub me_route_backpressure_enabled: bool,
+
+    /// Enable worker-local fairshare scheduler for ME reader routing.
+    #[serde(default = "default_me_route_fairshare_enabled")]
+    pub me_route_fairshare_enabled: bool,
+
     /// Base backpressure timeout in milliseconds for ME route channel send.
     #[serde(default = "default_me_route_backpressure_base_timeout_ms")]
     pub me_route_backpressure_base_timeout_ms: u64,
@@ -1059,6 +1067,8 @@ impl Default for GeneralConfig {
             disable_colors: false,
             telemetry: TelemetryConfig::default(),
             me_socks_kdf_policy: MeSocksKdfPolicy::Strict,
+            me_route_backpressure_enabled: default_me_route_backpressure_enabled(),
+            me_route_fairshare_enabled: default_me_route_fairshare_enabled(),
             me_route_backpressure_base_timeout_ms: default_me_route_backpressure_base_timeout_ms(),
             me_route_backpressure_high_timeout_ms: default_me_route_backpressure_high_timeout_ms(),
             me_route_backpressure_high_watermark_pct:
