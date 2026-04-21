@@ -544,8 +544,9 @@ mod tests {
 
     use super::{
         MeResponse, RouteResult, WorkerFairnessSnapshot, fairness_retry_delay,
-        is_data_route_queue_full, route_data_with_retry, should_close_on_queue_full_streak_with_policy,
-        should_close_on_route_result_for_ack, should_close_on_route_result_for_data, should_schedule_fairness_retry,
+        is_data_route_queue_full, route_data_with_retry,
+        should_close_on_queue_full_streak_with_policy, should_close_on_route_result_for_ack,
+        should_close_on_route_result_for_data, should_schedule_fairness_retry,
     };
 
     #[test]

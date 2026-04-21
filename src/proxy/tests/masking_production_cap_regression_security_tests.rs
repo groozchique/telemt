@@ -175,14 +175,8 @@ async fn copy_with_zero_cap_drains_until_eof() {
     let mut reader = FinitePatternReader::new(payload, 3072, read_calls);
     let mut writer = CountingWriter::default();
 
-    let outcome = copy_with_idle_timeout(
-        &mut reader,
-        &mut writer,
-        0,
-        true,
-        MASK_RELAY_IDLE_TIMEOUT,
-    )
-    .await;
+    let outcome =
+        copy_with_idle_timeout(&mut reader, &mut writer, 0, true, MASK_RELAY_IDLE_TIMEOUT).await;
 
     assert_eq!(outcome.total, payload);
     assert_eq!(writer.written, payload);
